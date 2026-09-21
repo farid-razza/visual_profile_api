@@ -7,8 +7,7 @@ photography looks.
 POST /image-transform/visual-profile
 ```
 
-The board is what the Create API takes as a reference image, so generated pictures
-resemble the client's existing ones instead of looking like generic stock.
+The board is what the Create API takes as a reference image.
 
 **Send 10 of the business's best images.** Fewer works and is not blocked; ten is the
 number to build around. See [section 5](#5-how-many-images-to-send).
