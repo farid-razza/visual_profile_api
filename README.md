@@ -1,1 +1,322 @@
-# visual_profile_api
+# Visual Profile API
+
+Reads a business's own images and returns **a visual board** describing how their
+photography looks.
+
+```
+POST /image-transform/visual-profile
+```
+
+The board is what the Create API takes as a reference image, so generated pictures
+resemble the client's existing ones instead of looking like generic stock.
+
+**Send 10 of the business's best images.** Fewer works and is not blocked; ten is the
+number to build around. See [section 5](#5-how-many-images-to-send).
+
+**This runs once per business**, not once per image. Store the board, reuse it for
+every image that business ever generates.
+
+---
+
+## Contents
+
+1. [How it fits together](#1-how-it-fits-together)
+2. [Request](#2-request)
+3. [Response](#3-response)
+4. [The board](#4-the-board)
+5. [How many images to send](#5-how-many-images-to-send)
+6. [Errors](#6-errors)
+7. [Setup and running](#7-setup-and-running)
+8. [Files](#8-files)
+
+---
+
+## 1. How it fits together
+
+```
+1. Pick images from the business's library        your code
+2. Build the board            <- this service     once, when the business is added
+3. Generate images            Create API          every time, using the board
+```
+
+Store the board and its URL against the business. Send that URL to Create as
+`reference_image_urls`, with `reference_kind: "visual_board"`.
+
+**The board describes how images look. The post text decides what they are of.**
+
+That division holds well when the copy asks for something the business actually does.
+It is weaker when the copy asks for something outside what they photograph: a roofing
+client whose library is all exterior work, given copy about a **ceiling** stain
+indoors, returned four images of which one was indoors and three drifted back outside
+to the roof. The board is a strong visual signal and it pulls toward the client's usual
+subject.
+
+So: **name the setting in the post text** when it is not the client's usual one —
+"inside the roof space", "at the counter", "in the workshop". Copy that only implies it
+may not be enough.
+
+---
+
+## 2. Request
+
+```json
+{
+  "image_urls": [
+    "https://example.com/photo-1.jpg",
+    "https://example.com/photo-2.jpg",
+    "https://example.com/photo-3.jpg"
+  ],
+  "business_id": "Gulf Coast Roofing & Exteriors"
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `image_urls` | **yes** | List of `http://` or `https://` image URLs. Alias: `images`. Max 20. |
+| `business_id` | no | Printed on the board and echoed back. Does not affect the analysis. |
+
+The URLs must be reachable **from this server**. Images are downloaded here, not
+fetched by OpenAI.
+
+---
+
+## 3. Response
+
+```jsonc
+{
+  "level": "VisualProfile",
+  "business_id": "Gulf Coast Roofing & Exteriors",
+  "images_requested": 10,
+  "images_used": 10,
+  "images_failed": [],
+
+  "board_base64": "iVBORw0KGgo...",   // the board, PNG, no "data:" prefix
+  "board_mime": "image/png",
+  "board_bytes": 1345678,
+
+  "profile_text": "VISUAL PROFILE — how this business's photographs are TAKEN...",
+
+  "profile": {
+    "palette": "...", "lighting": "...", "camera": "...",
+    "people_treatment": "...", "wardrobe": "...", "finish": "...",
+    "grade_and_contrast": "...", "brand_feel": "...",
+    "measured_palette": {
+      "colours": [{ "hex": "#707070", "share": 0.077, "name": "mid grey" }],
+      "warm_share": 0.467, "saturation": 0.28, "lightness": 0.47
+    },
+    "shot_types": [
+      { "framing": "...", "height": "...", "people": "...",
+        "image_numbers": [1, 5, 6], "share": 0.5 }
+    ],
+    "varies_across_the_set": ["..."],
+    "unknown": ["..."]
+  },
+
+  "warnings": [],
+  "usage": { "input": 7106, "output": 823, "total": 7929,
+             "cached_input_tokens": 0 },   // part of "input", billed cheaper
+  "timing_ms": { "download": 199, "model": 19209, "board": 1864, "total": 21272 }
+}
+```
+
+**`board_base64`** — decode, store, serve it at a URL, and send that URL to Create.
+
+**`profile_text`** — the same information as a text block, for callers that would
+rather send a prompt than a board. Either works; the board performs better.
+
+**`profile`** — the structured analysis, for review and debugging.
+
+**`shot_types`** — the framings this client actually uses, with the images in each and
+its share of the library. Pass the descriptions to Create as `shot_types` so three
+variations differ in framing.
+
+**`warnings`** — non-fatal notes. Show them to whoever sets the business up.
+
+**`images_failed`** — any URL that could not be used, with the reason. The board is
+still built from the rest; it only fails if **every** image fails.
+
+**How long it takes.** Measured over 16 boards of 4–10 images: 15 to 45 seconds, with
+a median of 26. Almost all of that is the analysis call — downloading the images takes
+about a second, and drawing the board one to two.
+
+---
+
+## 4. The board
+
+The board is **drawn**, not generated by an image model. A model asked to produce one
+has to render two dozen pieces of text, and does it unreliably — headings misspelled,
+swatch labels turned to nonsense. Drawing it gives correct text every time, costs
+nothing, and puts the client's real photographs on it.
+
+Everything on it comes from that client's library:
+
+| On the board | Where it comes from |
+|---|---|
+| Colour swatches | measured from the pixels — real hex values, not an impression |
+| Brand feel | the analyser's read of how the photography feels |
+| Category columns | the shot types, with the client's own photographs under each |
+| Lighting & atmosphere | the lighting field |
+| People & wardrobe | how people are handled, and what they wear |
+| Photographic style | finish, camera and grade |
+
+Nothing is invented for decoration. A panel with nothing behind it is left out.
+
+**Non-photographic images are excluded from the categories.** A poster or advert
+describes layout, not photography; used as a category it produces layouts. It stays out
+of the shot types and is noted under `unknown`.
+
+### Sending it to Create
+
+```jsonc
+{ "input_text": "Full strip and re-roof finished Thursday...",
+  "image_type": "meta", "dimension": "meta_square", "locale": "en-US",
+  "reference_image_urls": ["https://example.com/board.png"],
+  "reference_kind": "visual_board" }
+```
+
+`reference_kind: "visual_board"` matters. Without it Create treats the board as a
+photograph to match, and the likely result is a collage with lettering in it.
+
+---
+
+## 5. How many images to send
+
+**Send 10 of the business's best images.** That is the number to build around.
+
+Ten is enough for the analyser to find the framings a business really uses and to
+measure a palette that holds up. Measured over 16 boards built this way: 2 to 4 shot
+types each, and no warnings on any of them. More than ten is allowed, up
+to `MAX_IMAGES` (default 20), but it refines those groupings rather than changing them,
+and every image adds to the analysis time and cost.
+
+**Fewer works, and is not blocked.** One business in testing had only 4 usable images
+in its archive; its board built in 16 seconds, with no warnings, and generated the same
+way as the rest. Below `RECOMMENDED_IMAGES` (default 3) the response carries a warning
+— the board then describes those few pictures rather than the business.
+
+**Which ten.** Pick images that span the business, not the prettiest ones and not
+several of the same thing: the work being done, finished results, the premises,
+products, people at work. The board can only describe what it is shown, so ten near
+duplicates give you a board about one thing.
+
+**Leave out what is not a photograph.** Logos, icons, banners, posters and promotional
+graphics describe layout rather than photography. The service already keeps
+non-photographic images out of the shot types and notes them under `unknown`, but
+filtering them before you send is better — they still cost time to download and read.
+
+---
+
+## 6. Errors
+
+Every failure returns the same shape:
+
+```json
+{ "error": "a message explaining what to fix" }
+```
+
+| Status | Meaning | Examples |
+|---|---|---|
+| **400** | the request, or the images | `image_urls is required (a list of image URLs)` · `image_urls[2] must start with http:// or https://` · `too many images: 30 sent, the limit is 20` · `business_id must be a string` · `none of the images could be downloaded` |
+| **502** | the model failed | `profile model error: ...` · `profile model returned invalid JSON` |
+| **500** | misconfigured | `OPENAI_API_KEY is not set` · `prompt.txt missing` |
+
+A field of the wrong type is rejected, not ignored. Unknown fields are ignored.
+
+---
+
+## 7. Setup and running
+
+```bash
+cd visual-profile-api
+pip install -r requirements.txt
+cp .env.example .env        # then put your key in it
+```
+
+**One system dependency.** The board's text is drawn with Pillow, which needs a real
+TrueType font on the machine. Windows and macOS already have one. A slim Linux
+container usually does not, and without it Pillow falls back to a small bitmap font
+and the board's headings come out tiny:
+
+```bash
+apt-get install -y fonts-dejavu-core      # Debian/Ubuntu
+```
+
+**Windows PowerShell** — the `cd` is required so `uvicorn` can import `app`:
+
+```powershell
+cd D:\Downloads\transform-image-python\visual-profile-api
+D:\Downloads\transform-image-python\.venv\Scripts\python.exe -m uvicorn app:app --reload --port 8600
+```
+
+**Anywhere else:**
+
+```bash
+uvicorn app:app --reload --port 8600
+```
+
+Check it is alive:
+
+```bash
+curl http://localhost:8600/health      # {"ok": true}
+```
+
+Interactive API docs: <http://localhost:8600/docs>
+
+### Example call
+
+```bash
+curl -X POST http://localhost:8600/image-transform/visual-profile \
+  -H "Content-Type: application/json" \
+  -d '{"business_id":"Gulf Coast Roofing",
+       "image_urls":["https://example.com/1.jpg",
+                     "https://example.com/2.jpg",
+                     "https://example.com/3.jpg"]}'
+```
+
+### Environment variables
+
+| Variable | Required | Default | What it does |
+|---|---|---|---|
+| `OPENAI_API_KEY` | **yes** | — | your OpenAI key |
+| `OPENAI_PROFILE_MODEL` | no | `gpt-5.1` | must be able to read images |
+| `OPENAI_TIMEOUT` | no | `300` | seconds to wait for the model |
+| `PROFILE_MAX_TOKENS` | no | `4000` | cap on the analysis length |
+| `MAX_IMAGES` | no | `20` | more than this is rejected |
+| `RECOMMENDED_IMAGES` | no | `3` | fewer than this adds a warning |
+| `PALETTE_SIZE` | no | `6` | swatches on the board |
+| `DOWNLOAD_TIMEOUT` | no | `60` | seconds per image |
+| `MAX_IMAGE_BYTES` | no | `20971520` | 20MB per image |
+
+The key is read on the first request, not at startup, so the server starts and
+`/health` answers without one.
+
+---
+
+## 8. Files
+
+```
+visual-profile-api/
+├── app.py             FastAPI entrypoint, CORS, /health
+├── router.py          the route
+├── controller.py      reads the JSON body and validates it
+├── service.py         download → analyse → measure palette → draw board
+├── board_render.py    composes the board with Pillow
+├── prompt.txt         what the analyser is asked to produce
+└── requirements.txt
+```
+
+**`prompt.txt` is read once and cached — restart the server after editing it.**
+
+To change what the analysis contains, edit `prompt.txt`. To change how the board looks,
+edit `board_render.py`. To change the text block Create can take instead of a board,
+edit `render_profile_text()` in `service.py`.
+
+### The one rule the analysis follows
+
+**A reader must not be able to tell what industry the business is in.** The analyser
+describes treatment — palette, light, camera, wardrobe, finish — and is forbidden from
+naming a trade, product, setting or activity. Those belong to the post text.
+
+That is what stops a client's own subjects being forced into every generated image: the
+board shows their photographs, but the words never say "roofing", so the copy is free
+to ask for something else.
